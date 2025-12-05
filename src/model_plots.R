@@ -1,0 +1,438 @@
+################################################################################
+################################################################################
+###############  Pre - Post treatment extinction validation Runs ###############
+################################################################################
+################################################################################
+setwd("~/Desktop/Repos/resistanceEvolution_Model/src")
+source("modelFunc.R")
+
+##* note that N_max is limited to 4.29 billion (4.29 x 10^9) as the upper limit on unsigned int values *##
+##* note that N_max of 1.8e19 is a theoretical max using C++ long long, but 1e15 is likely a rational upper limit *##
+##* long long values of population sizes are acceptable in the simulation, but dramatically increase computational overhead *##
+k_drug = 5 ## fold- increase in death rate due to drug susceptibility
+N_max_val = 1e9 ## 1e9 takes ~3.1 min to run 500000 sims
+b_fact = 1 ## scalar increase to birth rate
+mu = 1e-6
+N_init <- data.frame(WT = 1) ## initial population size
+
+
+## calculate birth / death probabilities
+b <- 2*b_fact; d <- 1; b_prob <- b/(b+d)
+## estimate reasonable upper bounds for T_max 
+T_max_val <- ceiling(ceiling(log(base = 2*b_prob, N_max_val)) * 1.2)
+T_maxTreat_val <- max(ceiling(ceiling(log(base = 2*b_prob, N_max_val * 2)) * 1.2), 100)
+
+## parameter data frame with default values
+pars <- data.frame(
+  n_reps = 1000, n_drugs = 3, T_max = T_max_val, n_retry = 10,
+  N_max = N_max_val, T_maxTreat = T_maxTreat_val, N_maxTreat = N_max_val * 2,
+  fit_cost = 0.005,
+  resCrit = 1e8, verbose = 1, data_out = 2, keepReps = 50,
+  batchname = paste0("fullSimRes"),
+  par_dat = paste0("fullSim_pars"),
+  saveFiles = F
+)
+
+
+## define parameter grid values
+## use value of NA for default ranges [specified in mapVals function]
+## use value of NULL to ignore in parameter grid
+extinctionMap <- mapVals(list(
+  n_drugs = c(1:5),
+  N_max = 1*10^(10:12),
+  mu = 1*10^(c(-5,-9)),
+  b_fact = NULL,
+  k_drug = NULL,
+  fit_cost = c(.5, exp_range(-1,-3, decreasing = T)[-1], 0)
+))
+
+
+## Set up parallel backend 
+ncores <- floor( parallel::detectCores() - 2 )
+cl <- makeCluster(ncores) 
+registerDoParallel(cl)
+
+## evaluate model over parameter grid
+TIC <- Sys.time()
+results <- foreach(i = 1:nrow(extinctionMap), .combine = rbind, 
+                   .packages = c("dplyr"), .options.snow = list(preschedule = FALSE)) %dopar% {
+                     
+                     ## extract the i-th parameter set
+                     vals <- extinctionMap[i, , drop = FALSE]        # data.frame 1-row
+                     param_names <- names(vals)
+                     val_list <- as.list(vals[1, ])                  # named scalars for easy access
+                     
+                     ## === Assign only those params that exist in pars ===
+                     pars_cols_to_set <- intersect(param_names, names(pars))
+                     if (length(pars_cols_to_set) > 0) {
+                       # create a 1-row data.frame with the same column order as pars_cols_to_set
+                       tmp <- vals[ , pars_cols_to_set, drop = FALSE]
+                       # assign into pars (recycling/scalar assignment is fine since tmp is 1-row)
+                       pars[ , pars_cols_to_set] <- tmp[rep(1, nrow(pars)), , drop = FALSE]
+                     }
+                     
+                     ## update batchname and par_dat using the grid values (stringify safely)
+                     batch_suffix <- paste0(param_names, "_", sapply(val_list, function(x) paste0(x, collapse = ",")), collapse = "_")
+                     pars$batchname <- paste0("fullSimRes_", batch_suffix)
+                     pars$par_dat   <- paste0("fullSim_", batch_suffix, "_pars")
+                     
+                     ## === Handle special parameters that are not plain scalar columns in pars ===
+                     ## (e.g., mu might be per-site vector, n_drugs affects dimensions, k_drug used later)
+                     # n_drugs override if present in grid
+                     if ("n_drugs" %in% param_names) {
+                       pars$n_drugs <- as.integer(val_list[["n_drugs"]])
+                     }
+                     
+                     # N_max override if present (used for T_max recomputation, but keep local copy)
+                     if ("N_max" %in% param_names) {
+                       N_max_val <- as.numeric(val_list[["N_max"]])
+                       pars$N_maxTreat = 2*N_max_val
+                     }
+                     
+                     # b_fact or d overrides (used for recomputing b,d and T_max)
+                     if (any(c("b_fact","d") %in% param_names)) {
+                       # use values either from val_list or fallback to existing variables
+                       b_fact_val <- if ("b_fact" %in% param_names) as.numeric(val_list[["b_fact"]]) else b_fact
+                       d_val      <- if ("d"      %in% param_names) as.numeric(val_list[["d"]])      else d
+                       
+                       b <- 2 * b_fact_val
+                       d <- d_val
+                       b_prob <- b / (b + d)
+                       # recompute T_max values using the (possibly updated) N_max_val
+                       T_max_val <- ceiling(ceiling(log(N_max_val, base = 2*b_prob)) * 1.2)
+                       T_maxTreat_val <- max(ceiling(ceiling(log(N_max_val * 1.2, base = 2*b_prob)) * 1.2), 100)
+                       # update pars T_max fields if you want
+                       pars$T_max <- T_max_val
+                       pars$T_maxTreat <- T_maxTreat_val
+                     }
+                     
+                     ## mu: if present in the grid, capture for site_pars; do NOT assign into pars directly
+                     mu_val <- if ("mu" %in% param_names) {
+                       as.numeric(val_list[["mu"]])
+                     } else {
+                       mu    # fallback to global/default mu
+                     }
+                     
+                     ## k_drug: if provided in grid, use it for site_pars; else fallback to existing k_drug variable
+                     k_drug_val <- if ("k_drug" %in% param_names) {
+                       as.numeric(val_list[["k_drug"]])
+                     } else {
+                       k_drug
+                     }
+                     
+                     ## === Build site_pars (mu repeated per-site, k repeated per-site) ===
+                     site_pars <- data.frame(
+                       mu = rep(mu_val, pars$n_drugs),
+                       k  = rep(k_drug_val, pars$n_drugs)
+                     ) %>% t() %>% as.data.frame()
+                     
+                     
+                     ## define parameters for each class type
+                     b_vec <- makeLabels_vec(pars$n_drugs) + b
+                     d_vec <- makeLabels_vec(pars$n_drugs) + d
+                     type_pars <- make_initial_pop(
+                       K = pars$n_drugs, init_size = N_init,
+                       b_vec = b_vec, d_vec = d_vec
+                     )
+                     
+                     
+                     ## Run the model
+                     tic <- Sys.time()
+                     out <- multiType_FullSim(
+                       n_reps = pars$n_reps, 
+                       type_pars = type_pars, site_pars = site_pars, 
+                       parameters = pars, 
+                       exe_path = "./multiType_FullSim.exe",
+                       run_dir = NULL, 
+                       saveFiles = pars$saveFiles
+                     )
+                     toc <- Sys.time()
+                     tictoc <- toc - tic
+                     
+                     
+                     ## remove replicates where extinction occurred before treatment
+                     out <- out[!(out$ext == 1), ]
+                     
+                     
+                     ## calculate simulation statistics
+                     sims_used <- nrow(out)
+                     frac_resolved  <- (sum(out$crit) + sum(out$treatSuccess)) / nrow(out)
+                     num_success <- sum(out$treatSuccess) # process went extinct after introduction of treatment
+                     num_resCrit <- sum(out$preResistance > 0 & out$crit > 0) # any resistant genotypes in the population
+                     num_FullResCrit <- sum(out$preResistance == 2 & out$crit > 0) # de-novo full mutant
+                     num_res <- sum(out$preResistance > 0 ) # any resistant genotypes in the population
+                     num_FullRes <- sum(out$preResistance == 2 ) # de-novo full mutant
+                     
+                     num_preTreatCrit <- sum(out$preTreatCrit) # count of simulations where full mutants at high prevalence before treatment
+                     
+                     ## return data frame with grid parameters and the associated simulation statistics
+                     data.frame(
+                       vals,
+                       simsUsed = sims_used,
+                       fracResolved = frac_resolved,
+                       numSuccess = num_success,
+                       numResCrit = num_resCrit,
+                       numFullResCrit = num_FullResCrit,
+                       numRes = num_res,
+                       numFullRes = num_FullRes,
+                       numPreTreatCrit = num_preTreatCrit,
+                       resFilename = paste0("./simulation_files/", pars$batchname, "_results.txt"),
+                       repsFilename = paste0("./simulation_files/", pars$batchname, "_full_results.txt")
+                     )
+                   }
+TOC <- Sys.time()
+print(TOC - TIC)
+stopCluster(cl)
+
+# Merge results back into extinctionMap
+extinctionMap <- results; rm(results)
+options(scipen = 0)
+
+## Option to read in output of previous simulation from file
+# write.table(extinctionMap, file = paste0("./extinctionMap_Nmax6", Sys.Date(), ".txt"), sep = ",", row.names = FALSE, col.names = TRUE)
+# extinctionMap = read.table(file.choose(), sep = ',')
+# out = read.table(extinctionMap$resFilename[9], sep = ';', header = T); out <- out[!(out$ext == 1), ] 
+
+## --- probability of successful treatment ---
+extinctionMap$successFrac <- extinctionMap$numSuccess / extinctionMap$simsUsed
+
+## --- probability of resistance --- (1-P(success))
+extinctionMap$resProb <- 1 - extinctionMap$successFrac
+
+## --- Probability of pre-treatment resistance ---
+extinctionMap$resFrac <- (extinctionMap$numRes / extinctionMap$simsUsed)
+
+## --- Probability of full pre-treatment resistance ---
+### note that this is specifically the number of simulations where a full mutant
+### was detected prior to treatment divided by the number of critical simulations.
+### Thus values greater than one indicates stochastic extinction, and values less than one
+### indicate cases where resistance emerged after starting treatment and became critical
+extinctionMap$fullResCritFrac <- (extinctionMap$numFullRes / (extinctionMap$numFullResCrit))
+
+extinctionMap$fracPreResistance <- (extinctionMap$numFullResCrit / extinctionMap$numResCrit)
+# safe numeric conversion (handles factors and characters)
+extinctionMap <- extinctionMap %>%
+  mutate(
+    mu_num    = as.numeric(as.character(mu)),
+    N_max_num = as.numeric(as.character(N_max))
+  ) %>%
+  filter(!is.na(mu_num), !is.na(N_max_num))
+
+# unique sorted values for ordering
+mu_vals     <- sort(unique(extinctionMap$mu_num), decreasing = TRUE)  # largest -> smallest
+Nmax_vals   <- sort(unique(extinctionMap$N_max_num), decreasing = FALSE) # ascending
+
+# formatted strings for parsed labels (scientific notation)
+fmt_mu     <- function(x) sprintf("%.0e", x)        # "1e-03" etc
+fmt_Nmax   <- function(x) sprintf("%.0e", x)
+
+# construct label strings and factors with correct explicit levels
+extinctionMap <- extinctionMap %>%
+  mutate(
+    mu_label_str   = paste0("mu == ", fmt_mu(mu_num)),
+    Nmax_label_str = paste0("N[max] == ", fmt_Nmax(N_max_num)),
+    mu_lab = factor(mu_label_str, levels = paste0("mu == ", fmt_mu(mu_vals))),
+    N_max_lab = factor(Nmax_label_str, levels = paste0("N[max] == ", fmt_Nmax(Nmax_vals)))
+  )
+
+# Map color to the same discrete factor so manual palette lines up
+extinctionMap <- extinctionMap %>%
+  mutate(mu_fact = factor(mu_num, levels = mu_vals))
+
+# build palette of the right length
+n_mu_levels <- length(mu_vals)
+pal <- rev(sequential_hcl(n_mu_levels+2, palette = "Heat"))[2:(n_mu_levels+1)]
+
+## define facet variables
+facetVar_list = c("n_drugs",  # 1
+                  "N_max",    # 2
+                  "mu",       # 3
+                  "fit_cost", # 4
+                  "b_fact",   # 5
+                  "k_drug"    # 6
+)
+
+x_var = facetVar_list[1]
+row_var = facetVar_list[2]
+col_var = facetVar_list[4]
+color_var = facetVar_list[3]
+
+p1 <- plot_metric_grid(extinctionMap, 
+                       y_var = "resProb", 
+                       x_var = x_var,
+                       facet_row = row_var, 
+                       facet_col = col_var, 
+                       const_vals = list(b_fact = b_fact, k_drug = k_drug),
+                       color_var = color_var,
+                       transform = '')
+p1
+
+
+p2 <- plot_metric_grid(extinctionMap, 
+                       y_var = "resProb", 
+                       facet_row = row_var, 
+                       facet_col = col_var, 
+                       const_vals = list(b_fact = b_fact, k_drug = k_drug),
+                       color_var = color_var,
+                       transform = 'log')
+p2
+
+# Simulation with full resistance at treatment / simulations with supercritical dynamics
+p3 <- plot_metric_grid(extinctionMap, 
+                       y_var = "fullResCritFrac", 
+                       facet_row = row_var, 
+                       facet_col = col_var, 
+                       const_vals = list(b_fact = b_fact, k_drug = k_drug),
+                       color_var = color_var)
+p3
+
+# fraction of simulations with at least 1 mutant present at the start of treatment
+p4 <- plot_metric_grid(extinctionMap, 
+                       y_var = "resFrac", 
+                       facet_row = row_var, 
+                       facet_col = col_var, 
+                       const_vals = list(b_fact = b_fact, k_drug = k_drug),
+                       color_var = color_var)
+p4
+
+# number of simulations where full mutants were >1e8 before treatment
+p5 <- plot_metric_grid(extinctionMap, 
+                       y_var = "numPreTreatCrit", 
+                       facet_row = row_var, 
+                       facet_col = col_var, 
+                       const_vals = list(b_fact = b_fact, k_drug = k_drug),
+                       color_var = color_var)
+p5
+
+# fraction where resistance was preexisting
+p6 <- plot_metric_grid(extinctionMap, 
+                       y_var = "fracPreResistance", 
+                       facet_row = row_var, 
+                       facet_col = col_var, 
+                       const_vals = list(b_fact = 1, k_drug = 10),
+                       color_var = color_var)
+p6
+
+
+
+
+# reshape to long format: one row per (rep, Gen, class)
+idx = 37
+reps_out = read.csv(extinctionMap$repsFilename[idx], sep = ';') %>%
+  filter(rep %in% unique(rep)[1:20])
+df_long <- reps_out %>%
+  pivot_longer(cols = c(WT, M1, M2, M12),
+               names_to = "Class",
+               values_to = "Count")
+
+# --- Identify extinction times per replicate ---
+extinction_points <- df_long %>%
+  group_by(rep, Gen) %>%
+  summarise(total_pop = sum(Count), .groups = "drop") %>%
+  group_by(rep) %>%
+  summarise(
+    extinct_gen = if (any(total_pop == 0)) min(Gen[total_pop == 0]) else NA_real_
+  ) %>%
+  filter(!is.na(extinct_gen))
+
+# --- Calculate mean treatment start generation ---
+mean_treat_gen <- reps_out %>%
+  group_by(rep) %>%
+  summarise(treat_start = min(Gen[treatStatus == 1], na.rm = TRUE)) %>%
+  summarise(mean_treat_start = mean(treat_start, na.rm = TRUE)) %>%
+  pull(mean_treat_start)
+
+# --- Plot trajectories with extinction marks ---
+ggplot(df_long, aes(x = Gen, y = log(Count, base = 10), color = Class, group = interaction(Class, rep))) +
+  geom_line(alpha = 0.7, linewidth = 1) +
+  geom_point(
+    data = extinction_points,
+    aes(x = extinct_gen, y = 0),
+    inherit.aes = FALSE,
+    shape = 4,           # 'x' symbol
+    size = 4,
+    stroke = 1.2,
+    color = "black"
+  ) +
+  geom_vline(
+    xintercept = mean_treat_gen,
+    linetype = "dotted",
+    color = "red",
+    linewidth = 1.2
+  ) +
+  # --- Horizontal dashed reference lines ---
+  geom_hline(yintercept = c(8, 10), linetype = "dashed", color = "gray40") +
+  theme_bw() +
+  labs(
+    title = "Population Trajectories by Class",
+    x = "Generation",
+    y = expression(log[10]*"(Population Size)"),
+    color = "Class"
+  ) +
+  theme(
+    text = element_text(size = 14),
+    plot.title = element_text(face = "bold", hjust = 0.5)
+  )
+
+
+
+
+unique(extinctionMap$mu)
+plot_metric_heatmap(extinctionMap, 
+                    fill_val = "successFrac",
+                    x_var = "n_drugs",
+                    y_var = "k_drug", 
+                    const_vals = list(mu=unique(extinctionMap$mu)[2],
+                                      b_fact = NA,
+                                      N_max = NA),
+                    param_names = NULL)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+make_pairwise_heatmaps <- function(df, vars = c("mu", "N_max", "n_drugs"), value_col = "successFrac") {
+  
+  # Get all unique 2-variable combinations
+  pairs <- combn(vars, 2, simplify = FALSE)
+  
+  plots <- map(pairs, function(pair) {
+    xvar <- pair[1]
+    yvar <- pair[2]
+    
+    ggplot(df, aes_string(x = xvar, y = yvar, fill = value_col)) +
+      geom_tile(color = "white") +
+      scale_fill_viridis_c(option = "B", direction = -1) +
+      labs(
+        title = paste("Heatmap of", value_col, "by", xvar, "and", yvar),
+        x = xvar,
+        y = yvar,
+        fill = value_col
+      ) +
+      theme_bw(base_size = 14) +
+      theme(
+        plot.title = element_text(hjust = 0.5, face = "bold"),
+        panel.grid = element_blank()
+      )
+  })
+  
+  names(plots) <- sapply(pairs, function(p) paste(p, collapse = "_vs_"))
+  return(plots)
+}
+
+plots <- make_pairwise_heatmaps(extinctionMap, value_col = "successFrac")
+
+# Access or display them
+plots$mu_vs_N_max
+plots$mu_vs_n_drugs
+plots$N_max_vs_n_drugs

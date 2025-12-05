@@ -30,7 +30,7 @@ pars <- data.frame(
   resCrit = 1e8, verbose = 1, data_out = 2, keepReps = 50,
   batchname = paste0("fullSimRes"),
   par_dat = paste0("fullSim_pars"),
-  saveFiles = T
+  saveFiles = F
 )
 
 

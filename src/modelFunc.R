@@ -23,7 +23,9 @@ library(doParallel)
 library(foreach)
 
 
-multiType_FullSim <- function(n_reps, type_pars, site_pars, parameters, exe_path = "./multiType_FullSim.exe", run_dir = NULL, saveFiles = TRUE) {
+multiType_FullSim <- function(n_reps, type_pars, site_pars, parameters, 
+                              exe_path = "./multiType_FullSim.exe", run_dir = NULL, 
+                              saveFiles = TRUE) {
   
   parvec <- c(format(n_reps, scientific = FALSE),
               parameters$n_drugs, # number of independent drugs/mutation sites
@@ -57,16 +59,16 @@ multiType_FullSim <- function(n_reps, type_pars, site_pars, parameters, exe_path
   
   res <- system2(exe_path, args = strvec, stdout = FALSE)
   
-  out <- read.table(paste0("./simulation_files/", pars$batchname, "_results.txt"), header = TRUE, sep = ";", check.names = FALSE) %>%
+  out <- read.table(paste0("./simulation_files/", parameters$batchname, "_results.txt"), header = TRUE, sep = ";", check.names = FALSE) %>%
     mutate_all(as.numeric)
   
   ## remove all generated files
   
   if(!saveFiles){
-    files = c(paste0("./simulation_files/", pars$batchname, "_results.txt"), ## results file
-              paste0("./simulation_files/", pars$batchname, "_full_results.txt"), ## replicate trajectory file
-              paste0("./simulation_files/", pars$batchname, "_err.txt"), ## error file
-              paste0("./simulation_files/", parameters$par_dat, "_results.txt") ## parameter file
+    files = c(paste0("./simulation_files/", parameters$batchname, "_results.txt"), ## results file
+              paste0("./simulation_files/", parameters$batchname, "_full_results.txt"), ## replicate trajectory file
+              paste0("./simulation_files/", parameters$batchname, "_err.txt"), ## error file
+              paste0("./simulation_files/", parameters$par_dat, ".txt") ## parameter file
     )
     file.remove(files)
   }

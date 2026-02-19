@@ -40,7 +40,8 @@ multiType_FullSim <- function(n_reps, type_pars, site_pars, parameters,
               parameters$batchname, # name element for output / error files
               parameters$par_dat, # specified name for parameter file
               parameters$fit_cost,
-              parameters$n_retry
+              parameters$n_retry,
+              parameters$mu_del
   ) 
   strvec <- format(parvec, digits = 5)
   
@@ -170,6 +171,18 @@ makeLabels_vec <- function(K, bitwise = FALSE) {
   
 }
 
+
+## simple expression for mu_del -- lethal deleterious
+get_mu_del <- function(mu, genomeSize = 5e6, frac_del = 0.01){
+  1 - ( 1 - mu )^( genomeSize * frac_del )
+}
+
+## simple expression for mu_ben -- resistance granting
+#### N_B should be a vector of length K where the i-th element
+#### gives the number of sites that grant resistance to drug i
+get_mu_ben <- function(mu, N_B){
+  1 - ( 1 - mu )^( N_B )
+}
 
 # --- helper: exponential range generator ---
 exp_range <- function(start_exp, end_exp, decreasing = FALSE) {

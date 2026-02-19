@@ -106,8 +106,9 @@ struct Parameters
     
     std::vector<double> b_vec; // type-specific birth rate
     std::vector<double> d_vec; // type-specific death rate
-    std::vector<double> mu_vec; // per-site mutation probability
+    std::vector<double> mu_vec; // per-site beneficial mutation probabilities
     std::vector<double> k_vec; // drug efficacy factor
+    double mu_del; // probability of a deleterious mutation during reproduction
     double fit_cost; // per mutation cumulative fitness cost
     int n_retry; // number of allowed retries when extinction occurs before treatment
     
@@ -171,7 +172,7 @@ struct Parameters
 
         // must be read in before evaluating length since the number of classes (and thus parameters) is variable based on the number of variable sites / drugs
         
-        size_t conf_length = 13; //number of model input parameters
+        size_t conf_length = 14; //number of model input parameters
         if (conf_v.size()!=conf_length)
         {
             std::cout << "Expected configuration file with " << conf_length << " options, loaded file with "
@@ -187,6 +188,7 @@ struct Parameters
         T_maxTreat = std::stoi(conf_v[3]); // select step between output generations
         N_maxTreat = std::stoll(conf_v[4]); // critical population size
         fullRes_nonExtinction = std::stoll(conf_v[5]); // separate threshold for fully resistant mutants --> almost assured treatment failiure
+        mu_del = std::stod(conf_v[13]); // probability of a deleterious mutation during reproduction
         fit_cost = std::stod(conf_v[11]); // per mutation fitness cost
         n_retry = std::stoi(conf_v[12]); // number of allowed retries when extinction occurs before treatment
         
@@ -369,14 +371,19 @@ treeData branchingSim_byGen( std::ofstream &errOut,
                 
                 // number of individuals that reproduce this generation
                 long long n_reproduce = draw_binom_gsl(current_gen[type], birth_probs_pre[type]);
-                std::vector<long long> offspring_vector = draw_multinom_gsl(n_reproduce, std::vector<double>(mu_prob[type].begin(), mu_prob[type].end()) );
+                
+                // number of reproductive events where offspring acquires lethal mutation
+                long long n_del = draw_binom_gsl(n_reproduce, p.mu_del);
+                
+                // number of offspring of each type - conditioned on not having a lethal mutation
+                std::vector<long long> offspring_vector = draw_multinom_gsl(n_reproduce - n_del, std::vector<double>(mu_prob[type].begin(), mu_prob[type].end()) );
                 
                 // Add offspring to next generation
                 for (int j = 0; j < offspring_vector.size(); ++j) {
                     next_gen[j] += offspring_vector[j];
                 }
                 
-                // Add the parents back to their own type
+                // Add the parents back to their own type - includes parents of offspring with lethal mutations
                 next_gen[type] += n_reproduce;
                 
             }
@@ -506,15 +513,20 @@ treeData branchingSim_byGen( std::ofstream &errOut,
             if (current_gen[type] == 0) continue;
 
             // number of individuals that reproduce this generation
-            long long n_reproduce = draw_binom_gsl(current_gen[type], birth_probs_post[type]);
-            std::vector<long long> offspring_vector = draw_multinom_gsl(n_reproduce, std::vector<double>(mu_prob[type].begin(), mu_prob[type].end()) );
+            long long n_reproduce = draw_binom_gsl(current_gen[type], birth_probs_pre[type]);
+            
+            // number of reproductive events where offspring acquires lethal mutation
+            long long n_del = draw_binom_gsl(n_reproduce, p.mu_del);
+            
+            // number of offspring of each type - conditioned on not having a lethal mutation
+            std::vector<long long> offspring_vector = draw_multinom_gsl(n_reproduce - n_del, std::vector<double>(mu_prob[type].begin(), mu_prob[type].end()) );
             
             // Add offspring to next generation
             for (int j = 0; j < offspring_vector.size(); ++j) {
                 next_gen[j] += offspring_vector[j];
             }
-
-            // Add the parents back to their own type
+            
+            // Add the parents back to their own type - includes parents of offspring with lethal mutations
             next_gen[type] += n_reproduce;
             
         }
@@ -681,7 +693,7 @@ std::vector<double> birthProbs(const Parameters& p, int treat_indicator){
     // declare b and d variables for
     // usage in lambda helper functions
     double b; double d;
-    double pmc = p.fit_cost; // hard coded birth rate cost per mutation
+    double pmc = p.fit_cost; // birth rate cost per mutation
     
     //------------------------------------//
     //     helper lambda functions for    //
@@ -702,15 +714,13 @@ std::vector<double> birthProbs(const Parameters& p, int treat_indicator){
         return {b_star, d_star};
     };
     
-    // reduction of birth from fitness costs by # mutations -- WIP
+    // reduction of birth from fitness costs by # mutations
     // n_mut = numMutations(cls);
     auto fit_cost = [&b, &d, &pmc](int n_mut) -> std::vector<double> {
         double b_star = b*pow((1-pmc), n_mut);
         double d_star = d;
         return {b_star, d_star};
     };
-    
-    // etc...
     
     
     //---------------------//
@@ -822,6 +832,7 @@ int main(int argc, char* argv[]){
         errOut << "T_maxTreat: " << p.T_maxTreat << "\n";
         errOut << "N_maxTreat: " << p.N_maxTreat << "\n";
         errOut << "fullRes_nonExtinction: " << p.fullRes_nonExtinction << "\n";
+        errOut << "mu_del: " << p.mu_del << "\n";
         errOut << "verbose: " << p.verbose << "\n";
         errOut << "data_out: " << p.data_out << "\n";
         errOut << "batchname: " << p.batchname << "\n";

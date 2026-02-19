@@ -12,7 +12,7 @@ source("modelFunc.R")
 k_drug = 5 ## fold- increase in death rate due to drug susceptibility
 N_max_val = 1e9 ## 1e9 takes ~3.1 min to run 500000 sims
 b_fact = 1 ## scalar increase to birth rate
-mu = 1e-6
+mu = 1e-6 ## per-base-pair mutation rate
 N_init <- data.frame(WT = 1) ## initial population size
 
 
@@ -24,13 +24,13 @@ T_maxTreat_val <- max(ceiling(ceiling(log(base = 2*b_prob, N_max_val * 2)) * 1.2
 
 ## parameter data frame with default values
 pars <- data.frame(
-  n_reps = 1000, n_drugs = 3, T_max = T_max_val, n_retry = 10,
+  n_reps = 10, n_drugs = 3, T_max = T_max_val, n_retry = 10,
   N_max = N_max_val, T_maxTreat = T_maxTreat_val, N_maxTreat = N_max_val * 2,
   fit_cost = 0.005,
   resCrit = 1e8, verbose = 1, data_out = 2, keepReps = 50,
   batchname = paste0("fullSimRes"),
   par_dat = paste0("fullSim_pars"),
-  saveFiles = F
+  saveFiles = T
 )
 
 
@@ -39,7 +39,7 @@ pars <- data.frame(
 ## use value of NULL to ignore in parameter grid
 extinctionMap <- mapVals(list(
   n_drugs = c(1:5),
-  N_max = 1*10^(10:12),
+  N_max = 1*10^(10:13),
   mu = 1*10^(c(-5,-9)),
   b_fact = NULL,
   k_drug = NULL,
@@ -120,9 +120,14 @@ results <- foreach(i = 1:nrow(extinctionMap), .combine = rbind,
                        k_drug
                      }
                      
+                     ## define parameters that depend on n_drugs or mu
+                     N_B = rep(1, pars$n_drugs) ## **fix so this need not be hard coded**
+                     pars$mu_del = get_mu_del(mu = mu_val) ## **fix so other parameters can be specified easily**
+                     
                      ## === Build site_pars (mu repeated per-site, k repeated per-site) ===
                      site_pars <- data.frame(
-                       mu = rep(mu_val, pars$n_drugs),
+                       # mu = rep(mu_val, pars$n_drugs), ## old version -- technically equivalent to N_B = 1
+                       mu = get_mu_ben(mu_val, N_B), ## updated to define beneficial mutation prob based on per-site values
                        k  = rep(k_drug_val, pars$n_drugs)
                      ) %>% t() %>% as.data.frame()
                      
@@ -254,7 +259,7 @@ facetVar_list = c("n_drugs",  # 1
 
 x_var = facetVar_list[1]
 row_var = facetVar_list[2]
-col_var = facetVar_list[4]
+col_var = facetVar_list[3]
 color_var = facetVar_list[3]
 
 p1 <- plot_metric_grid(extinctionMap, 
@@ -317,7 +322,7 @@ p6
 
 
 # reshape to long format: one row per (rep, Gen, class)
-idx = 37
+idx = 2
 reps_out = read.csv(extinctionMap$repsFilename[idx], sep = ';') %>%
   filter(rep %in% unique(rep)[1:20])
 df_long <- reps_out %>%

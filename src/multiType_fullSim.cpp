@@ -513,7 +513,7 @@ treeData branchingSim_byGen( std::ofstream &errOut,
             if (current_gen[type] == 0) continue;
 
             // number of individuals that reproduce this generation
-            long long n_reproduce = draw_binom_gsl(current_gen[type], birth_probs_pre[type]);
+            long long n_reproduce = draw_binom_gsl(current_gen[type], birth_probs_post[type]);
             
             // number of reproductive events where offspring acquires lethal mutation
             long long n_del = draw_binom_gsl(n_reproduce, p.mu_del);

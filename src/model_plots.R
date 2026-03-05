@@ -24,9 +24,9 @@ T_maxTreat_val <- max(ceiling(ceiling(log(base = 2*b_prob, N_max_val * 2)) * 1.2
 
 ## parameter data frame with default values
 pars <- data.frame(
-  n_reps = 10, n_drugs = 3, T_max = T_max_val, n_retry = 10,
+  n_reps = 1000, n_drugs = 3, T_max = T_max_val, n_retry = 10,
   N_max = N_max_val, T_maxTreat = T_maxTreat_val, N_maxTreat = N_max_val * 2,
-  fit_cost = 0.005,
+  fit_cost = 0.0, frac_del = 0.1,
   resCrit = 1e8, verbose = 1, data_out = 2, keepReps = 50,
   batchname = paste0("fullSimRes"),
   par_dat = paste0("fullSim_pars"),
@@ -39,11 +39,12 @@ pars <- data.frame(
 ## use value of NULL to ignore in parameter grid
 extinctionMap <- mapVals(list(
   n_drugs = c(1:5),
-  N_max = 1*10^(10:13),
-  mu = 1*10^(c(-5,-9)),
+  N_max = 1*10^(9),
+  mu = 1*10^(c(-5)),
   b_fact = NULL,
   k_drug = NULL,
-  fit_cost = c(.5, exp_range(-1,-3, decreasing = T)[-1], 0)
+  #fit_cost = c(.5, exp_range(-1,-3, decreasing = T)[-1], 0)
+  fit_cost = NULL
 ))
 
 
@@ -122,7 +123,7 @@ results <- foreach(i = 1:nrow(extinctionMap), .combine = rbind,
                      
                      ## define parameters that depend on n_drugs or mu
                      N_B = rep(1, pars$n_drugs) ## **fix so this need not be hard coded**
-                     pars$mu_del = get_mu_del(mu = mu_val) ## **fix so other parameters can be specified easily**
+                     pars$mu_del = get_mu_del(mu = mu_val, frac_del = pars$frac_del) ## **fix so other parameters can be specified easily**
                      
                      ## === Build site_pars (mu repeated per-site, k repeated per-site) ===
                      site_pars <- data.frame(

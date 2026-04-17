@@ -17,19 +17,21 @@ N_init <- data.frame(WT = 1) ## initial population size
 
 
 ## calculate birth / death probabilities
-b <- 2*b_fact; d <- 1; b_prob <- b/(b+d)
+b <- 1.1*b_fact; d <- 1; b_prob <- b/(b+d)
 ## estimate reasonable upper bounds for T_max 
 T_max_val <- ceiling(ceiling(log(base = 2*b_prob, N_max_val)) * 1.2)
 T_maxTreat_val <- max(ceiling(ceiling(log(base = 2*b_prob, N_max_val * 2)) * 1.2), 100)
 
 ## parameter data frame with default values
 pars <- data.frame(
-  n_reps = 1000, n_drugs = 3, T_max = T_max_val, n_retry = 10,
+  n_reps = 10000, n_drugs = 3, T_max = T_max_val, n_retry = 20,
   N_max = N_max_val, T_maxTreat = T_maxTreat_val, N_maxTreat = N_max_val * 2,
   fit_cost = 0.0, frac_del = 0.1,
+  R = 1000, k = 0.5,
   resCrit = 1e8, verbose = 1, data_out = 2, keepReps = 50,
   batchname = paste0("fullSimRes"),
   par_dat = paste0("fullSim_pars"),
+  exe_path = "./multiType_FullSim.exe",
   saveFiles = T
 )
 
@@ -39,8 +41,8 @@ pars <- data.frame(
 ## use value of NULL to ignore in parameter grid
 extinctionMap <- mapVals(list(
   n_drugs = c(1:5),
-  N_max = 1*10^(9),
-  mu = 1*10^(c(-5)),
+  N_max = 1*10^(9:12),
+  mu = 1*10^(c(-5:-9)),
   b_fact = NULL,
   k_drug = NULL,
   #fit_cost = c(.5, exp_range(-1,-3, decreasing = T)[-1], 0)
@@ -148,7 +150,7 @@ results <- foreach(i = 1:nrow(extinctionMap), .combine = rbind,
                        n_reps = pars$n_reps, 
                        type_pars = type_pars, site_pars = site_pars, 
                        parameters = pars, 
-                       exe_path = "./multiType_FullSim.exe",
+                       exe_path = pars$exe_path,
                        run_dir = NULL, 
                        saveFiles = pars$saveFiles
                      )

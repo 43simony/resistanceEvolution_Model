@@ -21,7 +21,9 @@ library(colorspace)
 library(data.table)
 library(doParallel)
 library(foreach)
-
+library(readxl)
+library(mgcv)
+library(scam)
 
 multiType_FullSim <- function(n_reps, type_pars, site_pars, parameters, 
                               exe_path = "./multiType_FullSim.exe", run_dir = NULL, 
@@ -41,7 +43,9 @@ multiType_FullSim <- function(n_reps, type_pars, site_pars, parameters,
               parameters$par_dat, # specified name for parameter file
               parameters$fit_cost,
               parameters$n_retry,
-              parameters$mu_del
+              parameters$mu_del, 
+              parameters$R,
+              parameters$k
   ) 
   strvec <- format(parvec, digits = 5)
   
@@ -173,7 +177,17 @@ makeLabels_vec <- function(K, bitwise = FALSE) {
 
 
 ## simple expression for mu_del -- lethal deleterious
-get_mu_del <- function(mu, genomeSize = 5e6, frac_del = 0.01){
+get_mu_del <- function(mu, genomeSize = NA, frac_del = 0.01){
+  
+  # if not provided, calculate appropriate genome size based on correlation w/ mu
+  if(is.na(genomeSize)){
+    # dat = read_excel("genome_mutation_corr.xlsx") # read in data
+    # dat$genomeSize = dat$`Genome size (kb)`*1000 # convert to units bp
+    # coef = lm(data = dat, formula = log10(genomeSize) ~ log10(mu)) 
+    ## above regression used to obtain correlation model parameters
+    genomeSize = floor( 10^(2.728987 - 0.2676165*log10(mu)) )
+  }
+  
   1 - ( 1 - mu )^( genomeSize * frac_del )
 }
 
@@ -251,6 +265,324 @@ mapVals <- function(param_list) {
   df <- do.call(expand.grid, final_params)
   return(df)
 }
+
+
+fill_bounds <- function(val, lwr, upr, var) {
+  if (!is.na(lwr) & !is.na(upr)) {
+    return(list(lwr = lwr, upr = upr))
+  }
+  
+  if (var %in% log_vars) {
+    factor <- runif(1, 2, 4)  # span orders of magnitude
+    return(list(
+      lwr = val / factor,
+      upr = val * factor
+    ))
+  } else {
+    spread <- val * runif(1, 0.2, 0.5)
+    return(list(
+      lwr = val - spread,
+      upr = val + spread
+    ))
+  }
+}
+
+
+sample_param <- function(var, n) {
+  vmin <- min(extinctionMap[[var]], na.rm = TRUE)
+  vmax <- max(extinctionMap[[var]], na.rm = TRUE)
+  
+  if (var %in% log_vars) {
+    # uniform in log space
+    return(10^runif(n, log10(vmin), log10(vmax)))
+  } else {
+    # uniform in linear space
+    return(runif(n, vmin, vmax))
+  }
+}
+
+# -----------------------------
+# Ellipse generator
+# -----------------------------
+make_ellipse <- function(cx, cy, lx, ux, ly, uy, n = 120,
+                         log_x = FALSE, log_y = FALSE) {
+  
+  theta <- seq(0, 2*pi, length.out = n)
+  
+  if (log_x) {
+    cx <- log10(cx)
+    lx <- log10(lx)
+    ux <- log10(ux)
+  }
+  
+  if (log_y) {
+    cy <- log10(cy)
+    ly <- log10(ly)
+    uy <- log10(uy)
+  }
+  
+  rx <- (ux - lx) / 2
+  ry <- (uy - ly) / 2
+  
+  x <- cx + rx * cos(theta)
+  y <- cy + ry * sin(theta)
+  
+  if (log_x) x <- 10^x
+  if (log_y) y <- 10^y
+  
+  tibble(x = x, y = y)
+}
+
+# Function to create ellipse in log space
+ellipse_logspace <- function(N, mu, N_lwr, N_upr, mu_lwr, mu_upr, n = 150) {
+  
+  # transform to log10 space
+  x0 <- log10(N)
+  y0 <- log10(mu)
+  
+  rx <- max(abs(log10(N_lwr) - x0), abs(log10(N_upr) - x0))
+  ry <- max(abs(log10(mu_lwr) - y0), abs(log10(mu_upr) - y0))
+  
+  t <- seq(0, 2 * pi, length.out = n)
+  
+  x_log <- x0 + rx * cos(t)
+  y_log <- y0 + ry * sin(t)
+  
+  # convert back to original scale
+  tibble(
+    x = 10^x_log,
+    y = 10^y_log
+  )
+}
+
+# -----------------------------
+# Plot function
+# -----------------------------
+
+my_colors <- setNames(
+  viridis::viridis(K_max, option = "plasma"),
+  as.character(1:K_max)
+)
+
+## Threshold heatmap plots
+plot_surface <- function(pred_var, title_suffix) {
+  
+  # enforce discrete drug counts
+  grid[[pred_var]] <- ceiling(grid[[pred_var]])
+  
+  # update breaks
+  break_vals <- sort(unique(grid[[pred_var]]))
+  threshold$drugs_needed_f <- factor(threshold$drugs_needed, levels = 1:K_max)
+  
+  legend_labels <- break_vals
+  
+  p <- ggplot() +
+    geom_contour(
+      data = grid,
+      aes(
+        x = .data[[x_var]],
+        y = .data[[y_var]],
+        z = .data[[pred_var]]
+      ),
+      breaks = break_vals,
+      color = "black",
+      linewidth = 0.4
+    ) +
+    geom_contour_filled(
+      data = grid,
+      aes(
+        x = .data[[x_var]],
+        y = .data[[y_var]],
+        z = .data[[pred_var]]
+      ),
+      breaks = break_vals,
+      alpha = 0.35
+    ) +
+    
+    # random hypothetical data
+    geom_polygon(
+      data = ellipse_df,
+      aes(x = x, y = y, group = id),
+      alpha = 0.25,
+      fill = "steelblue",
+      color = "steelblue",
+      inherit.aes = FALSE
+    ) +
+    geom_point(
+      data = df_bounds,
+      aes(x = .data[[x_var]], y = .data[[y_var]]),
+      size = 3,
+      color = "red"
+    ) +
+    geom_text(
+      data = df_bounds,
+      aes(x = .data[[x_var]], y = .data[[y_var]], label = name),
+      vjust = -0.9,
+      size = 3.8,
+      color = "red"
+    ) +
+    
+    # True pathogen data
+    geom_polygon(
+      data = path_dat_ellipse,
+      aes(x = x, y = y, group = id),
+      alpha = 0.25,
+      fill = "steelblue",
+      color = "steelblue",
+      inherit.aes = FALSE
+    ) +
+    geom_point(
+      data = path_dat_bounds,
+      aes(x = .data[[x_var]], y = .data[[y_var]]),
+      size = 3,
+      color = "red"
+    ) +
+    geom_text(
+      data = path_dat_bounds,
+      aes(x = .data[[x_var]], y = .data[[y_var]], label = pathogen),
+      vjust = -0.9,
+      size = 3.8,
+      color = "red"
+    ) +
+    
+    scale_fill_manual(
+      values = unname(my_colors[break_vals]),  
+      labels = break_vals,
+      name = "Drugs needed"
+    ) +
+    coord_cartesian(
+      xlim = c(x_min, x_max),
+      ylim = c(y_min, y_max),
+      expand = FALSE
+    ) +
+    labs(
+      x = x_var,
+      y = y_var,
+      title = paste0(
+        "Drug threshold for resistance < ",
+        p_crit,
+        " (", title_suffix, ")"
+      )
+    ) +
+    theme_bw(base_size = 12)
+  
+  if (log_x) p <- p + scale_x_log10()
+  if (log_y) p <- p + scale_y_log10()
+  
+  return(p)
+}
+
+## alternative plot function using simulation data
+plot_sim_surface <- function() {
+  
+  
+  # plot
+  threshold$drugs_needed_f <- factor(threshold$drugs_needed, levels = 1:K_max)
+  break_vals <- sort(unique(threshold$drugs_needed))
+  p <- ggplot() + 
+    geom_contour( 
+      data = threshold, 
+      aes( x = .data[[x_var]], y = .data[[y_var]], z = drugs_needed ), 
+      breaks = break_vals, 
+      color = "black", 
+      linewidth = 0.5 ) + 
+    
+    geom_contour_filled( data = threshold, 
+                         aes( x = .data[[x_var]], y = .data[[y_var]], z = drugs_needed ), 
+                         breaks = break_vals, 
+                         alpha = 0.35 ) +
+    
+    # random hypothetical data
+    geom_polygon(
+      data = ellipse_df,
+      aes(x = x, y = y, group = id),
+      alpha = 0.25,
+      fill = "steelblue",
+      color = "steelblue",
+      inherit.aes = FALSE
+    ) +
+    geom_point(
+      data = df_bounds,
+      aes(x = .data[[x_var]], y = .data[[y_var]]),
+      size = 3,
+      color = "red"
+    ) +
+    geom_text(
+      data = df_bounds,
+      aes(x = .data[[x_var]], y = .data[[y_var]], label = name),
+      vjust = -0.9,
+      size = 3.8,
+      color = "red"
+    ) +
+    
+    # True pathogen data
+    geom_polygon(
+      data = path_dat_ellipse,
+      aes(x = x, y = y, group = id),
+      alpha = 0.25,
+      fill = "steelblue",
+      color = "steelblue",
+      inherit.aes = FALSE
+    ) +
+    geom_point(
+      data = path_dat_bounds,
+      aes(x = .data[[x_var]], y = .data[[y_var]]),
+      size = 3,
+      color = "red"
+    ) +
+    geom_text(
+      data = path_dat_bounds,
+      aes(x = .data[[x_var]], y = .data[[y_var]], label = pathogen),
+      vjust = -0.9,
+      size = 3.8,
+      color = "red"
+    ) +
+    
+    # discrete fill scale
+    scale_fill_manual(
+      values = unname(my_colors[break_vals]),  
+      labels = break_vals,
+      name = "Drugs needed"
+    ) +
+    
+    # coordinate limits
+    coord_cartesian(
+      xlim = c(x_min, x_max),
+      ylim = c(y_min, y_max),
+      expand = FALSE
+    ) +
+    
+    # labels and theme
+    labs(
+      x = x_var,
+      y = y_var,
+      title = paste0(
+        "Drug threshold for resistance < ",
+        p_crit,
+        " (Simulation data)"
+      )
+    ) +
+    theme_bw(base_size = 12) +
+    theme(
+      panel.grid = element_blank(),
+      panel.border = element_rect(color = "black", fill = NA, linewidth = 0.8),
+      axis.line = element_line(color = "black"),
+      axis.ticks = element_line(color = "black"),
+      legend.key.height = unit(0.6, "cm"),
+      legend.title = element_text(size = 11),
+      legend.text = element_text(size = 10),
+      plot.title = element_text(face = "bold")
+    )
+  
+  # ---------------------------
+  # 3. Log axes only for N_max and mu
+  # ---------------------------
+  if (log_x) p <- p + scale_x_log10()
+  if (log_y) p <- p + scale_y_log10()
+  
+  return(p)
+}
+
 
 
 
@@ -401,7 +733,7 @@ plot_metric_grid <- function(df, y_var, x_var = "n_drugs",
       axis.text.y = element_text(size = 14),
       axis.title.x = element_text(size = 16),
       axis.title.y = element_text(size = 16),
-      legend.position = "none",
+      #legend.position = "none",
       strip.text = element_text(size = 11, face = "bold"),
       panel.spacing = unit(0.8, "lines")
     )

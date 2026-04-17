@@ -60,6 +60,21 @@ long long draw_binom_gsl(long long N, double prob)
         return total_successes;
 }
 
+
+//Negative Binomial RV using gsl. -- parameterized using mean-dispersion as a generalization
+// k = 1 is equivalent to a geometric rv and approaches a poisson rv as k -> infinity
+// this process can equivalently be expressed as a poisson rv with a gamma distributed rate
+// with shape parameter k and scale parameter R/k using the below parameterization
+int draw_neg_binom_gsl(double R, double k)
+{
+    static Gsl_rng_wrapper rng_w;
+    static gsl_rng* r;
+    if(r == nullptr){ r = rng_w.get_r(); }
+    
+    double p = 1 / (1 + (R / k));
+    return gsl_ran_negative_binomial(r, p, k);
+}
+
 //Long chunked Multinomial RV using gsl.
 std::vector<long long> draw_multinom_gsl(long long N, const std::vector<double>& prob)
 {
@@ -111,6 +126,9 @@ struct Parameters
     double mu_del; // probability of a deleterious mutation during reproduction
     double fit_cost; // per mutation cumulative fitness cost
     int n_retry; // number of allowed retries when extinction occurs before treatment
+    double R; // mean viral burst size
+    double k; // dispersion parameter of burst size distribution
+    
     
     int T_max = 10; // number of generations
     int T_maxTreat = 10; // number of generations
@@ -172,7 +190,7 @@ struct Parameters
 
         // must be read in before evaluating length since the number of classes (and thus parameters) is variable based on the number of variable sites / drugs
         
-        size_t conf_length = 14; //number of model input parameters
+        size_t conf_length = 16; //number of model input parameters
         if (conf_v.size()!=conf_length)
         {
             std::cout << "Expected configuration file with " << conf_length << " options, loaded file with "
@@ -191,6 +209,8 @@ struct Parameters
         mu_del = std::stod(conf_v[13]); // probability of a deleterious mutation during reproduction
         fit_cost = std::stod(conf_v[11]); // per mutation fitness cost
         n_retry = std::stoi(conf_v[12]); // number of allowed retries when extinction occurs before treatment
+        R = std::stod(conf_v[14]); // mean viral burst size
+        k = std::stod(conf_v[15]); // dispersion parameter of burst size distribution
         
         // simulation output
         verbose = std::stoi(conf_v[6]); // verbose statements (always written to batchname_err.txt file)

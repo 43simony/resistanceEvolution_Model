@@ -1,0 +1,11 @@
+﻿pathogen,variable,value,units,upr,lwr
+SARS-CoV-2,N,1.00E+10,RNA copies,1.00E+09,1.00E+11
+SARS-CoV-2,mu,1.00E-06,1/base/cycle,,
+IAV,N,1.00E+12,RNA copies,,
+IAV,mu,1.40E-05,1/base/cycle,8.00E-06,2.00E-05
+P. fal,N,2.22E+11,N,2.01E+07,1.37E+09
+P. fal,mu,4.91E-09,1/base/year,,
+HIV,N,1.00E+07,RNA copies/mL,2.00E+05,5.00E+08
+HIV,mu,3.40E-05,1/base/cycle,,
+DENV,N,7395541941,DNA copies/mL,5357596526,10208689723
+DENV,mu,7.18E-04,1/base/cycle,1.00E-03,1.00E-05

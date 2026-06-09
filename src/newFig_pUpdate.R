@@ -9,31 +9,30 @@ source("modelFunc.R")
 ##* note that N_max is limited to 4.29 billion (4.29 x 10^9) as the upper limit on unsigned int values *##
 ##* note that N_max of 1.8e19 is a theoretical max using C++ long long, but 1e15 is likely a rational upper limit *##
 ##* long long values of population sizes are acceptable in the simulation, but dramatically increase computational overhead *##
-k_drug = 10 ## fold- increase in death rate due to drug susceptibility
-N_max_val = 1e9 ## 1e9 takes ~3.1 min to run 500000 sims
-b_fact = 3 ## scalar increase to birth rate
-mu = 1e-6 ## per-base-pair mutation rate
+k_drug =  0.95 ## R0 reduction due to drug susceptibility
+N_max_val = 1e12 ## 1e9 takes ~3.1 min to run 500000 sims
+mu = 1e-5 ## per-base-pair mutation rate
 N_init <- data.frame(WT = 1) ## initial population size
-K_max = 5
-N_max = 1e10
-
-## calculate birth / death probabilities
-b <- 1.01*b_fact; d <- 1; b_prob <- b/(b+d)
+K_max = 5 ## max number of drugs used
+G = 5e7 ## genome size
+## calculate birth probability based on R0
+R0 = 6
+b <- 1 - (1/(1+R0))
+R0*(1-k_drug) #R0 with drug - should be < 1 to be effective
 ## estimate reasonable upper bounds for T_max 
-T_max_val <- ceiling(ceiling(log(base = 2*b_prob, N_max_val)) * 1.2)
-T_maxTreat_val <- max(ceiling(ceiling(log(base = 2*b_prob, N_max_val * 2)) * 1.2), 100)
+T_max_val <- ceiling(ceiling(log(base = 2*b, N_max_val)) * 1.2)
+T_maxTreat_val <- max(ceiling(ceiling(log(base = 2*b, N_max_val * 2)) * 1.2), 100)
 
 ## parameter data frame with default values
 pars <- data.frame(
-  n_reps = 500000, n_drugs = 5, T_max = T_max_val, n_retry = 20,
+  n_reps = 10000, n_drugs = 3, T_max = T_max_val, n_retry = 20,
   N_max = N_max_val, T_maxTreat = T_maxTreat_val, N_maxTreat = N_max_val * 2,
-  fit_cost = 0.01, frac_del = 0.1,
-  R = 1000, k = 0.1,
+  b = b, fit_cost = 0.01, frac_del = 0.1, G = G,
   resCrit = 1e8, verbose = 1, data_out = 2, keepReps = 50,
   batchname = paste0("fullSimRes"),
   par_dat = paste0("fullSim_pars"),
-  exe_path = "./multiType_FullSim.exe",
-  saveFiles = F
+  exe_path = "./multiType_FullSim_p.exe",
+  saveFiles = T
 )
 
 
@@ -41,13 +40,13 @@ pars <- data.frame(
 ## use value of NA for default ranges [specified in mapVals function]
 ## use value of NULL to ignore in parameter grid
 extinctionMap <- mapVals(list(
-  n_drugs = c(1:K_max),
-  N_max = exp_range(8,13, decreasing = T),
-  mu = exp_range(-3,-10, decreasing = T),
+  n_drugs = c(1:7),
+  N_max = exp_range(6,13, decreasing = T)[-1],
+  mu = exp_range(-3,-11, decreasing = T)[-1],
   b_fact = NULL,
   k_drug = NULL,
   #fit_cost = c(.5, exp_range(-1,-3, decreasing = T)[-1], 0)
-  fit_cost = c(0, 0.01, 0.1)
+  fit_cost = NULL
 ))
 
 
@@ -93,22 +92,22 @@ results <- foreach(i = 1:nrow(extinctionMap), .combine = rbind,
                        pars$N_maxTreat = 2*N_max_val
                      }
                      
-                     # b_fact or d overrides (used for recomputing b,d and T_max)
-                     if (any(c("b_fact","d") %in% param_names)) {
-                       # use values either from val_list or fallback to existing variables
-                       b_fact_val <- if ("b_fact" %in% param_names) as.numeric(val_list[["b_fact"]]) else b_fact
-                       d_val      <- if ("d"      %in% param_names) as.numeric(val_list[["d"]])      else d
-                       
-                       b <- 3 * b_fact_val
-                       d <- d_val
-                       b_prob <- b / (b + d)
-                       # recompute T_max values using the (possibly updated) N_max_val
-                       T_max_val <- ceiling(ceiling(log(N_max_val, base = 2*b_prob)) * 1.2)
-                       T_maxTreat_val <- max(ceiling(ceiling(log(N_max_val * 1.2, base = 2*b_prob)) * 1.2), 100)
-                       # update pars T_max fields if you want
-                       pars$T_max <- T_max_val
-                       pars$T_maxTreat <- T_maxTreat_val
-                     }
+                     # # b_fact or d overrides (used for recomputing b,d and T_max)
+                     # if (any(c("b_fact","d") %in% param_names)) {
+                     #   # use values either from val_list or fallback to existing variables
+                     #   b_fact_val <- if ("b_fact" %in% param_names) as.numeric(val_list[["b_fact"]]) else b_fact
+                     #   d_val      <- if ("d"      %in% param_names) as.numeric(val_list[["d"]])      else d
+                     #   
+                     #   b <- 2 * b_fact_val
+                     #   d <- d_val
+                     #   b_prob <- b / (b + d)
+                     #   # recompute T_max values using the (possibly updated) N_max_val
+                     #   T_max_val <- ceiling(ceiling(log(N_max_val, base = 2*b_prob)) * 1.2)
+                     #   T_maxTreat_val <- max(ceiling(ceiling(log(N_max_val * 1.2, base = 2*b_prob)) * 1.2), 100)
+                     #   # update pars T_max fields if you want
+                     #   pars$T_max <- T_max_val
+                     #   pars$T_maxTreat <- T_maxTreat_val
+                     # }
                      
                      ## mu: if present in the grid, capture for site_pars; do NOT assign into pars directly
                      mu_val <- if ("mu" %in% param_names) {
@@ -126,7 +125,7 @@ results <- foreach(i = 1:nrow(extinctionMap), .combine = rbind,
                      
                      ## define parameters that depend on n_drugs or mu
                      N_B = rep(1, pars$n_drugs) ## **fix so this need not be hard coded**
-                     pars$mu_del = get_mu_del(mu = mu_val, frac_del = pars$frac_del) ## **fix so other parameters can be specified easily**
+                     pars$mu_del = get_mu_del(mu = mu_val, genomeSize = , frac_del = pars$frac_del) ## **fix so other parameters can be specified easily**
                      
                      ## === Build site_pars (mu repeated per-site, k repeated per-site) ===
                      site_pars <- data.frame(
@@ -137,11 +136,8 @@ results <- foreach(i = 1:nrow(extinctionMap), .combine = rbind,
                      
                      
                      ## define parameters for each class type
-                     b_vec <- makeLabels_vec(pars$n_drugs) + b
-                     d_vec <- makeLabels_vec(pars$n_drugs) + d
-                     type_pars <- make_initial_pop(
-                       K = pars$n_drugs, init_size = N_init,
-                       b_vec = b_vec, d_vec = d_vec
+                     type_pars <- make_initial_pop_p(
+                       K = pars$n_drugs, init_size = N_init
                      )
                      
                      
@@ -295,10 +291,15 @@ fixed_vals <- lapply(other_vars, function(v) {
 names(fixed_vals) <- other_vars
 
 
+
+
+
+
+
 # -----------------------------
 # Threshold surface
 # -----------------------------
-p_crit <- 0.001
+p_crit <- 0.01
 
 threshold <- extinctionMap %>%
   reduce(
@@ -432,7 +433,7 @@ path_dat_ellipse <- path_dat_bounds %>%
 # -----------------------------
 # Generate hypothetical dataset
 # -----------------------------
-n_points <- 1
+n_points <- 0
 set.seed(42)
 
 df_bounds <- tibble(
@@ -525,9 +526,9 @@ p <- plot_surface("gam_pred", "GAM smooth")
 q <- plot_sim_surface()
 r <- plot_surface("scam_pred", "Monotone SCAM")
 
-p
+#p
 q
-r
+#r
 
 combined_plot <- q + r + 
   plot_layout(ncol = 3) &   # 3 columns
@@ -537,7 +538,7 @@ combined_plot <- q + r +
     theme = theme(plot.title = element_text(face = "bold", size = 14))
   )
 
-combined_plot
+#combined_plot
 
 combined_plot <- q + p +
   plot_layout(ncol = 3) &   # 3 columns
@@ -547,7 +548,7 @@ combined_plot <- q + p +
     theme = theme(plot.title = element_text(face = "bold", size = 14))
   )
 
-combined_plot
+#combined_plot
 
 combined_plot <- p + q + r +
   plot_layout(ncol = 3) &   # 3 columns
@@ -557,12 +558,12 @@ combined_plot <- p + q + r +
     theme = theme(plot.title = element_text(face = "bold", size = 14))
   )
 
-combined_plot
+#combined_plot
 
 x_var = "n_drugs"
 row_var = facetVar_list[2]
 col_var = facetVar_list[1]
-color_var = facetVar_list[3]
+color_var = facetVar_list[2]
 
 
 n_Nmax <- 6   # number you want to keep
@@ -582,7 +583,99 @@ p1 <- plot_metric_grid(extinctionMap_trim,
                        x_var = x_var,
                        facet_row = row_var, 
                        facet_col = col_var, 
-                       const_vals = list(b_fact = b_fact, k_drug = k_drug),
+                       const_vals = list(k_drug = k_drug),
                        color_var = color_var,
-                       transform = "log")
+                       transform = "")
 p1
+
+
+########################################
+########################################
+
+N_max_val = 1e8
+
+T_max_val <- ceiling(ceiling(log(base = 2*b, N_max_val)) * 1.2)
+T_maxTreat_val <- max(ceiling(ceiling(log(base = 2*b, N_max_val * 2)) * 1.2), 100)
+
+R0 = 6
+b <- 1 - (1/(1+R0))
+
+pars <- data.frame(
+  n_reps = 6, n_drugs = 2, T_max = T_max_val, n_retry = 20,
+  N_max = N_max_val, T_maxTreat = T_maxTreat_val, N_maxTreat = N_max_val * 2,
+  b = b, fit_cost = 0.01, frac_del = 0.1, G = G,
+  resCrit = 1e8, verbose = 1, data_out = 2, keepReps = 6,
+  batchname = paste0("fullSimRes"),
+  par_dat = paste0("fullSim_pars"),
+  exe_path = "./multiType_FullSim_p.exe",
+  saveFiles = T
+)
+
+N_B = rep(1, pars$n_drugs) ## **fix so this need not be hard coded**
+pars$mu_del = get_mu_del(mu = mu_val, genomeSize = , frac_del = pars$frac_del) ## **fix so other parameters can be specified easily**
+
+## === Build site_pars (mu repeated per-site, k repeated per-site) ===
+site_pars <- data.frame(
+  # mu = rep(mu_val, pars$n_drugs), ## old version -- technically equivalent to N_B = 1
+  mu = get_mu_ben(mu_val, N_B), ## updated to define beneficial mutation prob based on per-site values
+  k  = rep(0.95, pars$n_drugs)
+) %>% t() %>% as.data.frame()
+
+
+## define parameters for each class type
+type_pars <- make_initial_pop_p(
+  K = pars$n_drugs, init_size = N_init
+)
+
+tic <- Sys.time()
+out <- multiType_FullSim(
+  n_reps = pars$n_reps, 
+  type_pars = type_pars, site_pars = site_pars, 
+  parameters = pars, 
+  exe_path = pars$exe_path,
+  run_dir = NULL, 
+  saveFiles = pars$saveFiles
+)
+toc <- Sys.time()
+toc - tic
+
+
+repsFilename = paste0("./simulation_files/", pars$batchname, "_full_results.txt")
+
+repi = read.csv(repsFilename, sep = ';')
+
+repi_long <- repi %>%
+  pivot_longer(
+    cols = c(WT, M1, M2, M12, N),
+    names_to = "genotype",
+    values_to = "abundance"
+  ) %>%
+  mutate(rep = factor(rep, levels = c(1,4,6,2,3,5)))
+
+extinct_pts <- repi %>%
+  group_by(rep) %>%
+  filter(N == 0) %>%
+  slice_head(n = 1) %>%
+  ungroup() %>%
+  select(rep, Gen)
+
+
+
+ggplot(repi_long,
+       aes(x = Gen,
+           y = log10(abundance),
+           color = genotype)) +
+  geom_line(linewidth = 1) +
+
+  facet_wrap(~rep) +
+  theme_bw() +
+  labs(
+    x = "Generation",
+    y = expression(log[10]("Population size")),
+    color = "Genotype"
+  ) +
+  theme(
+    strip.text = element_blank(),
+    strip.background = element_blank(),
+  )
+

@@ -17,6 +17,7 @@ library(viridis)
 library(tidyverse)
 library(patchwork)
 library(ggpubr)
+library(GGally)
 library(colorspace)
 library(data.table)
 library(doParallel)
@@ -24,6 +25,12 @@ library(foreach)
 library(readxl)
 library(mgcv)
 library(scam)
+library(gridExtra)
+
+library(dplyr)
+library(purrr)
+library(tidyr)
+
 
 multiType_FullSim <- function(n_reps, type_pars, site_pars, parameters, 
                               exe_path = "./multiType_FullSim.exe", run_dir = NULL, 
@@ -44,8 +51,7 @@ multiType_FullSim <- function(n_reps, type_pars, site_pars, parameters,
               parameters$fit_cost,
               parameters$n_retry,
               parameters$mu_del, 
-              parameters$R,
-              parameters$k
+              parameters$b
   ) 
   strvec <- format(parvec, digits = 5)
   
@@ -139,6 +145,46 @@ make_initial_pop <- function(K, init_size = data.frame(), b_vec, d_vec) {
   return(df)
 }
 
+make_initial_pop_p <- function(K, init_size = data.frame()) {
+  # number of genotypes
+  n_geno <- 2^K
+  
+  # generate bitmask labels
+  bitmask_labels <- sapply(0:(n_geno - 1), function(mask) {
+    if (mask == 0) {
+      "WT"
+    } else {
+      mutated_sites <- which(intToBits(mask)[1:K] == 1)
+      paste0("M", paste(mutated_sites, collapse = ""))
+    }
+  })
+  
+  # initialize all counts as zero
+  counts <- setNames(rep(0, n_geno), bitmask_labels)
+  
+  # check that init_size has correct column names
+  if (!missing(init_size) && ncol(init_size) > 0) {
+    provided_names <- colnames(init_size)
+    bad_names <- setdiff(provided_names, bitmask_labels)
+    
+    # warn if names don't match
+    if (length(bad_names) > 0) {
+      warning("Ignoring invalid initial states: ", paste(bad_names, collapse = ", "))
+    }
+    
+    # assign matching values
+    good_names <- intersect(provided_names, bitmask_labels)
+    counts[good_names] <- init_size[1, good_names]
+  }
+  
+  # construct final 3-row data frame
+  df <- rbind(
+    N = counts
+  )
+  
+  return(df)
+}
+
 ## function to generate a default named vector 
 #### for use in make_initial_pop (b_vec and d_vec)
 makeLabels_vec <- function(K, bitwise = FALSE) {
@@ -185,6 +231,7 @@ get_mu_del <- function(mu, genomeSize = NA, frac_del = 0.01){
     # dat$genomeSize = dat$`Genome size (kb)`*1000 # convert to units bp
     # coef = lm(data = dat, formula = log10(genomeSize) ~ log10(mu)) 
     ## above regression used to obtain correlation model parameters
+    #10^((log10(G) - 2.728987)/ (-0.2676165))
     genomeSize = floor( 10^(2.728987 - 0.2676165*log10(mu)) )
   }
   
@@ -205,6 +252,8 @@ exp_range <- function(start_exp, end_exp, decreasing = FALSE) {
   if (decreasing) sort(vals, decreasing = TRUE) else sort(vals)
 }
 
+inv.logit = function(x){exp(x)/(1+exp(x))}
+logit = function(x){log(x/(1-x))}
 
 # --- helper to build parameter grid data frame ---
 ## as long as names match the model parameter names, any parameter combination can be used
@@ -301,6 +350,377 @@ sample_param <- function(var, n) {
   }
 }
 
+
+
+## -----------------------------
+## Latin hypercube generator
+## -----------------------------
+get_lh_pars <- function(N_LH_sets = 100, lh_pars, par_names = NULL, sampling_scheme = "unif", vary_single = 1){
+  
+  library(dplyr)
+  library(lhs)
+  library(purrr)
+  
+  # -----------------------------
+  # 1. Valid parameters only
+  # -----------------------------
+  valid_names <- c("R0", "mu", "N_max", "w", "fit_cost", "n_drugs", "G")
+  
+  # if user specifies subset
+  if (!is.null(par_names)) {
+    valid_names <- intersect(valid_names, par_names)
+  }
+  
+  # trim to valid columns only
+  lh_pars <- lh_pars[, colnames(lh_pars) %in% valid_names, drop = FALSE]
+  
+  # safety checks
+  if (nrow(lh_pars) == 0) {
+    stop("No valid parameters found in lh_pars.")
+  }
+  
+  if (any(is.na(lh_pars['lwr',])) | any(is.na(lh_pars['upr',]))) {
+    stop("All parameters must have lwr and upr values.")
+  }
+  
+  if (any(lh_pars['lwr',] >= lh_pars['upr',])) {
+    stop("Each lwr must be strictly less than upr.")
+  }
+  
+  # -----------------------------
+  # 2. Generate normalized LHS
+  # -----------------------------
+  if(sampling_scheme == "lh"){
+    
+    lhs_raw <- optimumLHS(
+      n = N_LH_sets,
+      k = ncol(lh_pars)
+    )
+    
+  }else{
+    
+    lhs_raw <- matrix(
+      runif(N_LH_sets * ncol(lh_pars), min = 0, max = 1),
+      nrow = N_LH_sets,
+      ncol = ncol(lh_pars),
+      dimnames = list(
+        NULL,
+        colnames(lh_pars)
+      )
+    )
+    
+  }
+  colnames(lhs_raw) <- names(lh_pars)
+  
+  # -----------------------------
+  # 3. Scale each parameter
+  # -----------------------------
+  scale_param <- function(x, lwr, upr, pname) {
+    
+    # log-scale biologically wide parameters
+    if (pname %in% c("mu", "N_max", "G")) {
+      return(10^(log10(lwr) + x * (log10(upr) - log10(lwr))))
+    }
+    
+    # integer parameters
+    if (pname %in% c("n_drugs")) {
+      return(ceiling(lwr + x * (upr - lwr)))
+    }
+    
+    # linear-scale parameters
+    return(lwr + x * (upr - lwr))
+  }
+  
+  lhs_scaled <- as.data.frame(lhs_raw)
+  
+  ## apply scaling to each parameter column
+  for (i in 1:dim(lh_pars)[2]) {
+    
+    pname = names(lh_pars)[i]
+    lhs_scaled[[pname]] <- scale_param(
+      lhs_scaled[[pname]],
+      lh_pars["lwr", pname],
+      lh_pars["upr", pname],
+      pname
+    )
+    
+  }
+  
+  
+  # -----------------------------
+  # Filter / count biologically invalid sets
+  # -----------------------------
+  
+  hard_valid <- lhs_scaled %>%
+    rowwise() %>%
+    mutate(
+      hard_valid = valid_pars_lim(cur_data(), frac_del)
+    ) %>%
+    ungroup() %>%
+    pull(hard_valid)
+  
+  print( paste0(sum(hard_valid), " of ", N_LH_sets, " parameter sets valid" ))
+  
+  ## keep only parameter sets that satisfy model conditions
+  lhs_scaled <- as.data.frame(lhs_scaled[hard_valid,])
+  lhs_raw <- as.data.frame(lhs_raw[hard_valid,])
+  
+  ## for each parameter set, generate 'vary_single' new sets for each parameter, one at a time
+  if(vary_single > 1){
+    oat_list <- vector("list", nrow(lhs_raw))
+    for( i in 1:nrow(lhs_raw) ){
+      
+      base_row <- lhs_raw[i, , drop = FALSE]
+      
+      ## Generate OAT sets for each parameter
+      row_expansions <- map_dfr(par_names, function(focal_par) {
+        
+        ## replicate base row
+        raw_grid <- seq(from = round(min(lhs_raw[,focal_par]), digits = 3), 
+                        to = round(max(lhs_raw[,focal_par]), digits = 3), 
+                        by = 0.01)
+        
+        new_block <- as.data.frame(base_row[rep(1, length(raw_grid)), , drop = FALSE])
+        
+        ## vary only focal parameter
+        #new_block[, focal_par] <- runif(vary_single)
+        new_block[, focal_par] <- raw_grid
+        
+        # metadata
+        new_block$base_id <- i
+        new_block$base_par <- focal_par
+        
+        return(new_block)
+      })
+      
+      # optional: include original baseline point
+      base_with_meta <- base_row %>%
+        mutate(
+          base_id = i,
+          base_par = "baseline"
+        )
+      
+      oat_list[[i]] <- bind_rows(base_with_meta, row_expansions)
+    }
+    
+    lhs_raw = bind_rows(oat_list) 
+    rownames(lhs_raw) = NULL
+    
+    ## scale updated raw parameters if 'vary_single was used'
+    lhs_scaled <- as.data.frame(lhs_raw)
+    
+    for (i in 1:dim(lh_pars)[2]) {
+      
+      pname = names(lh_pars)[i]
+      lhs_scaled[[pname]] <- scale_param(
+        lhs_scaled[[pname]],
+        lh_pars["lwr", pname],
+        lh_pars["upr", pname],
+        pname
+      )
+      
+    }
+    
+    # -----------------------------
+    # Filter / count biologically invalid sets
+    # -----------------------------
+    
+    hard_valid <- lhs_scaled %>%
+      rowwise() %>%
+      mutate(
+        hard_valid = valid_pars_lim(cur_data(), frac_del)
+      ) %>%
+      ungroup() %>%
+      pull(hard_valid)
+    
+    print( paste0(sum(hard_valid), " of ", length(hard_valid), " parameter sets valid" ))
+    
+    ## keep only parameter sets that satisfy model conditions
+    lhs_scaled <- as.data.frame(lhs_scaled[hard_valid,])
+    lhs_raw <- as.data.frame(t(lhs_raw[hard_valid,]))
+    
+  }
+  
+  
+  # -----------------------------
+  # Derived parameters
+  # -----------------------------
+  
+  ## birth probability from R0
+  lhs_scaled$b <- 1 - (1 / (1 + lhs_scaled$R0))
+  
+  ## lethal deleterious sites (Z)
+  lhs_scaled$frac_del <- frac_del
+  lhs_scaled$Z <- floor(lhs_scaled$G * lhs_scaled$frac_del)
+  
+  
+  ## treatment population size
+  lhs_scaled$N_maxTreat <- lhs_scaled$N_max * 2
+  
+  ## generation limits
+  lhs_scaled$T_max <- ceiling(
+    ceiling(log(lhs_scaled$N_max, base = 2 * lhs_scaled$b)) * 1.2
+  )
+  
+  lhs_scaled$T_maxTreat <- max(
+    ceiling(
+      ceiling(log(lhs_scaled$N_maxTreat, base = 2 * lhs_scaled$b)) * 1.2
+    ),
+    100
+  )
+  
+  return(lhs_scaled)
+  
+}
+
+
+## valid parameter threshold functions
+## ensures full resistant has positive growth and the drug is effective against WT
+valid_pars_lim <- function(pars, frac_del){
+  cond_res_grow = pars$R0 * ( (1-pars$mu)^(pars$G*frac_del) ) * (1-pars$fit_cost)^(pars$n_drugs) > 1 ## ensure full resistant genotype can grow
+  cond_drug_kil =  pars$R0*(1-pars$w) < 1 ## ensure drug is effective in killing resistant strains
+  return(cond_res_grow & cond_drug_kil) ## conditions that ensure no guranteed extinction / impossible resistance
+}
+
+
+## function for data downsampling and regression over y-logit space
+process_param <- function(par_name, dat, mode = 0, model = "log",
+                          minDat = 5, sigChange = 0.5) {
+  
+  tmp <- dat %>%
+    filter( base_par %in% c(par_name, "baseline") ) %>%
+    mutate( base_par = if_else(base_par == "baseline", par_name, base_par) )
+  
+  if (model == "log") { tmp[[par_name]] <- log10(tmp[[par_name]]) }
+  
+  #---- function to process each base_id ----#
+  per_id <- function(i) {
+    
+    tmp_by_id <- tmp %>%
+      filter(base_id == i) %>%
+      mutate(pRes_trans = logit(fracResistance * 0.99 + 0.005))
+    
+    tmp_by_id <- switch(
+      as.character(mode),
+      "0" = { tmp_by_id },
+      
+      "1" = {
+        drop_dat = tmp_by_id[!(tmp_by_id$fracResistance %in% c(0,1)),]
+        if (nrow(drop_dat) >= minDat){ drop_dat }else{ NULL }
+      },
+      
+      ## caution: can cause issues in rare cases of non-monotonicity in mu at boundary
+      "2" = {
+        drop_dat = tmp_by_id[!(tmp_by_id$fracResistance %in% c(0,1)),]
+        x <- as.numeric(rownames(drop_dat))
+        runs <- cumsum(c(TRUE, diff(x) != 1))
+        x_keep <- x[runs %in% which(tabulate(runs) >= 3)]
+        
+        if (length(x_keep) == 0) {
+          NULL
+        } else {
+          x_keep <- c(min(x_keep) - 1, x_keep, max(x_keep) + 1)
+          
+          # Keep only rows that actually exist
+          x_keep <- intersect(x_keep, as.numeric(rownames(drop_dat)))
+          
+          drop_dat <- drop_dat[as.character(x_keep), , drop = FALSE]
+          if (nrow(drop_dat) >= minDat){ drop_dat }else{ NULL }
+        }
+      },
+      
+      ## caution: can cause issues in rare cases of non-monotonicity in mu at boundary
+      "3" = {
+        drop_dat = tmp_by_id[!(tmp_by_id$fracResistance %in% c(0,1)),]
+        x <- as.numeric(rownames(drop_dat))
+        runs <- cumsum(c(TRUE, diff(x) != 1))
+        x_keep <- x[runs %in% which(tabulate(runs) >= 3)]
+        
+        if (length(x_keep) == 0) {
+          NULL
+        } else {
+          drop_dat <- drop_dat[as.character(x_keep), , drop = FALSE]
+          if (nrow(drop_dat) >= minDat){ drop_dat }else{ NULL }
+        }
+      },
+      
+      "4" = {
+        drop_dat = tmp_by_id[!(tmp_by_id$fracResistance %in% c(0,1)),]
+        x <- as.numeric(rownames(drop_dat))
+        runs <- cumsum(c(TRUE, diff(x) != 1))
+        x_keep <- x[runs == which.max(tabulate(runs))]
+        
+        if (length(x_keep) == 0) {
+          NULL
+        } else {
+          out <- drop_dat[as.character(x_keep), , drop = FALSE]
+          if (nrow(out) >= minDat){ out }else{ NULL }
+        }
+      },
+      
+      "5" = {
+        drop_dat = tmp_by_id
+        
+        if ( abs(max(drop_dat$fracResistance) - min(drop_dat$fracResistance)) < sigChange ){ 
+          x_keep <- 1:dim(drop_dat)[1] ## keep all values if no strong change detected
+        }else{
+          x <- cumsum(sign(diff(drop_dat$fracResistance)))
+          x_keep <- 1:( which(abs(x) == max(abs(x)))[1]+1 ) #cutoff at first stable value after change
+        }
+        
+        ## trim data
+        if (length(x_keep) == 0) {
+          NULL
+        } else {
+          drop_dat <- drop_dat[as.character(x_keep), , drop = FALSE]
+          drop_dat <- drop_dat[!(drop_dat$fracResistance %in% c(0,1)),]
+          if (nrow(drop_dat) >= minDat){ drop_dat }else{ NULL }
+        }
+      },
+      
+      stop("Invalid mode")
+    )
+    
+    if (is.null(tmp_by_id)) {
+      return(list(
+        reg = tibble( par_id = i, slope = NA, val_min = NA, val_max = NA, mean = NA),
+        data = NULL
+      ))
+    }
+    
+    # Fit model
+    fit <- lm( reformulate(par_name, response = "pRes_trans"), data = tmp_by_id )
+    
+    ## compute change and range metrics
+    max_diff = (max(tmp_by_id$fracResistance) - min(tmp_by_id$fracResistance))
+    if(max_diff != 0){
+      alpha = 0.05
+      partSwitch = tmp_by_id$fracResistance[1] %in% c(0,1) | tmp_by_id$fracResistance[dim(tmp_by_id)[1]] %in% c(0,1)
+      fullSwitch = ( max(tmp_by_id$fracResistance) >= 1-alpha )  & ( min(tmp_by_id$fracResistance) <= alpha )
+      run = cumsum(c(TRUE, diff(tmp_by_id$fracResistance) != 0))
+      switchRange = tmp_by_id[c(max(which(run == min(run))), min(which(run == max(run)))), par_name]
+      
+    }else{ switchRange = c(NA,NA); partSwitch = F; fullSwitch = F }
+    
+    
+    return(list(
+      reg = tibble( par_id = i, slope = coef(fit)[[par_name]], diff = max_diff, diff_sign = max_diff*sign(coef(fit)[[par_name]]), val_min = switchRange[1], val_max = switchRange[2], mean = mean(tmp_by_id[,par_name]), ps = partSwitch, fs = fullSwitch),
+      data = tmp_by_id
+    ))
+    
+  }
+  
+  ## output parameter values should remain on natural scale
+  if (model == "log") { tmp[[par_name]] <- 10^(tmp[[par_name]]) }
+  
+  res <- map(unique(tmp$base_id), per_id)
+  
+  list(
+    reg = bind_rows(map(res, "reg")),
+    data = bind_rows( map(res, "data"), .id = "base_id" )
+  )
+}
+
 # -----------------------------
 # Ellipse generator
 # -----------------------------
@@ -359,10 +779,21 @@ ellipse_logspace <- function(N, mu, N_lwr, N_upr, mu_lwr, mu_upr, n = 150) {
 # Plot function
 # -----------------------------
 
+K_max=max(threshold$drugs_needed)
 my_colors <- setNames(
   viridis::viridis(K_max, option = "plasma"),
   as.character(1:K_max)
 )
+
+var_labels <- c(
+  mu = expression("Mutation rate (" * mu * ")"),
+  G = "Genome size (G)",
+  w = expression("Drug killing rate (" * kappa * ")"),
+  R0 = expression("Reproductive number (" * R[0] * ")"),
+  N_max = expression("Population size ("*N[max]*")"),
+  fit_cost = "Fitness cost (c)"
+)
+
 
 ## Threshold heatmap plots
 plot_surface <- function(pred_var, title_suffix) {
@@ -477,7 +908,7 @@ plot_sim_surface <- function() {
   
   
   # plot
-  threshold$drugs_needed_f <- factor(threshold$drugs_needed, levels = 1:K_max)
+  threshold$drugs_needed_f <- factor(threshold$drugs_needed, levels = 1:max(threshold$drugs_needed))
   break_vals <- sort(unique(threshold$drugs_needed))
   p <- ggplot() + 
     geom_contour( 
@@ -492,28 +923,28 @@ plot_sim_surface <- function() {
                          breaks = break_vals, 
                          alpha = 0.35 ) +
     
-    # random hypothetical data
-    geom_polygon(
-      data = ellipse_df,
-      aes(x = x, y = y, group = id),
-      alpha = 0.25,
-      fill = "steelblue",
-      color = "steelblue",
-      inherit.aes = FALSE
-    ) +
-    geom_point(
-      data = df_bounds,
-      aes(x = .data[[x_var]], y = .data[[y_var]]),
-      size = 3,
-      color = "red"
-    ) +
-    geom_text(
-      data = df_bounds,
-      aes(x = .data[[x_var]], y = .data[[y_var]], label = name),
-      vjust = -0.9,
-      size = 3.8,
-      color = "red"
-    ) +
+    # # random hypothetical data
+    # geom_polygon(
+    #   data = ellipse_df,
+    #   aes(x = x, y = y, group = id),
+    #   alpha = 0.25,
+    #   fill = "steelblue",
+    #   color = "steelblue",
+    #   inherit.aes = FALSE
+    # ) +
+    # geom_point(
+    #   data = df_bounds,
+    #   aes(x = .data[[x_var]], y = .data[[y_var]]),
+    #   size = 3,
+    #   color = "red"
+    # ) +
+    # geom_text(
+    #   data = df_bounds,
+    #   aes(x = .data[[x_var]], y = .data[[y_var]], label = name),
+    #   vjust = -0.9,
+    #   size = 3.8,
+    #   color = "red"
+    # ) +
     
     # True pathogen data
     geom_polygon(
@@ -554,8 +985,8 @@ plot_sim_surface <- function() {
     
     # labels and theme
     labs(
-      x = x_var,
-      y = y_var,
+      x = var_labels[x_var],
+      y = var_labels[y_var],
       title = paste0(
         "Drug threshold for resistance < ",
         p_crit,
@@ -568,9 +999,16 @@ plot_sim_surface <- function() {
       panel.border = element_rect(color = "black", fill = NA, linewidth = 0.8),
       axis.line = element_line(color = "black"),
       axis.ticks = element_line(color = "black"),
+      
+      axis.title.x = element_text(size = 16),
+      axis.title.y = element_text(size = 16),
+      
+      axis.text.x = element_text(size = 14, color = "black"),
+      axis.text.y = element_text(size = 14, color = "black"),
+      
       legend.key.height = unit(0.6, "cm"),
-      legend.title = element_text(size = 11),
-      legend.text = element_text(size = 10),
+      legend.title = element_text(size = 12),
+      legend.text = element_text(size = 12),
       plot.title = element_text(face = "bold")
     )
   
@@ -579,7 +1017,7 @@ plot_sim_surface <- function() {
   # ---------------------------
   if (log_x) p <- p + scale_x_log10()
   if (log_y) p <- p + scale_y_log10()
-  
+  p
   return(p)
 }
 
@@ -801,4 +1239,134 @@ plot_metric_heatmap <- function(df, fill_val,
   
   print(p)
 }
+
+
+
+
+plot_monotonicity <- function(
+    sens_results,
+    sens_vars,
+    transform = '',
+    output_var = "fracResistance",
+    save_plots = TRUE,
+    out_dir = "./figures/",
+    tag = "",
+    width = 840,
+    height = 840,
+    res = 100
+){
+  
+  # -----------------------------
+  # Safety checks
+  # -----------------------------
+  if (!(output_var %in% names(sens_results))) {
+    stop(paste("Output variable", output_var, "not found in sens_results"))
+  }
+  
+  missing_vars <- sens_vars[!sens_vars %in% names(sens_results)]
+  if (length(missing_vars) > 0) {
+    stop(
+      paste(
+        "Missing sensitivity variables:",
+        paste(missing_vars, collapse = ", ")
+      )
+    )
+  }
+  
+  # -----------------------------
+  # Helper for log-scale variables
+  # -----------------------------
+  log_vars <- c("mu", "N_max", "G")
+  
+  
+  # -----------------------------
+  # Storage for plots
+  # -----------------------------
+  plot_list <- list()
+  
+  # -----------------------------
+  # Generate one plot per variable
+  # -----------------------------
+  for (var in sens_vars) {
+    
+    fit <- lm(reformulate(var, response = output_var), data = sens_results)
+    slope <- coef(fit)[[var]]
+    
+    p <- ggplot( data = sens_results, aes(x = .data[[var]], y = .data[[output_var]]) ) +
+      geom_point(alpha = 0.5) +
+      geom_smooth(method = "lm", formula = y ~ x, color = "blue") +
+      labs(
+        x = var,
+        y = output_var,
+        title = paste("Monotonicity:", output_var, "vs", var)
+      ) +
+      annotate(
+        "text",
+        x = Inf,
+        y = Inf,
+        label = paste0("Slope = ", round(slope, 3)),
+        hjust = 1.1,
+        vjust = 1.5
+      ) +
+      theme_bw(base_size = 12) +
+      theme(
+        plot.title = element_text(face = "bold"),
+        panel.grid = element_blank()
+      )
+    
+    # apply log scale if appropriate
+    if (var %in% log_vars | transform == 'log') {
+      p <- p + scale_x_log10()
+    }
+    
+    # save individually if requested
+    if (save_plots) {
+      jpeg(
+        filename = file.path(
+          out_dir,
+          paste0("monotonic_", var, tag, ".jpeg")
+        ),
+        width = width,
+        height = height,
+        units = "px",
+        res = res
+      )
+      print(p)
+      dev.off()
+    }
+    
+    plot_list[[var]] <- p
+  }
+  
+  # -----------------------------
+  # Combined panel plot -- 2 plots per row
+  # -----------------------------
+  row_tot = ceiling( length(plot_list)/2 )
+  combined_plot <- marrangeGrob(
+    grobs = plot_list,
+    nrow = row_tot,
+    ncol = 2,
+    top = paste("Sensitivity monotonicity:", output_var)
+  )
+  
+  # optional combined PDF
+  if (save_plots) {
+    ggsave(
+      filename = file.path(
+        out_dir,
+        paste0("monotonic_ALL_", output_var, tag, ".pdf")
+      ),
+      combined_plot,
+      width = 12,
+      height = 10
+    )
+  }
+  
+  # -----------------------------
+  # Return plots
+  # -----------------------------
+  return(plot_list)
+}
+
+
 
